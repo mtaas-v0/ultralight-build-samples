@@ -14,12 +14,13 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Set current date
-        id: date
+      - name: Set current timestamp
+        id: timestamp
         shell: pwsh
         run: |
-          $currentDate = Get-Date -Format "yyyy-MM-dd"
-          echo "BUILD_DATE=$currentDate" >> $env:GITHUB_ENV
+          # Generates format: YYYY-MM-DD_HH-mm (in UTC)
+          $currentTimestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd_HH-mm")
+          echo "BUILD_TIMESTAMP=$currentTimestamp" >> $env:GITHUB_ENV
 
       - name: Download Ultralight SDK
         shell: pwsh
@@ -54,7 +55,7 @@ jobs:
       - name: Prepare Output Package
         shell: pwsh
         run: |
-          $outDir = "ultralight-samples-$($env:BUILD_DATE)"
+          $outDir = "ultralight-samples-$($env:BUILD_TIMESTAMP)"
           New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
           # Copy executables
@@ -87,11 +88,9 @@ jobs:
               Copy-Item -Path $_.FullName -Destination $target -Recurse -Force
           }
 
-          Compress-Archive -Path "$outDir/*" -DestinationPath "$outDir.zip" -Force
-
-      - name: Upload Dated Zip Artifact
+      - name: Upload Timestamped Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ultralight-samples-win-x64-${{ env.BUILD_DATE }}
-          path: ultralight-samples-${{ env.BUILD_DATE }}.zip
+          name: ultralight-samples-win-x64-${{ env.BUILD_TIMESTAMP }}
+          path: ultralight-samples-${{ env.BUILD_TIMESTAMP }}
           retention-days: 30
