@@ -51,51 +51,65 @@ jobs:
         shell: pwsh
         run: |
           $outDir = "ultralight-samples-$($env:BUILD_TIMESTAMP)"
-          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+          New-Item -ItemType Directory -Path "$outDir/_shared" -Force | Out-Null
 
-          # 1. Copy all compiled executables (.exe)
-          Get-ChildItem -Path 'sdk/build' -Recurse -Filter '*.exe' | ForEach-Object {
-              Copy-Item $_.FullName -Destination $outDir -Force
-          }
-
-          # 2. Copy all runtime DLLs
+          # 1. Store DLLs & resources ONCE in _shared folder
           Get-ChildItem -Path 'sdk' -Recurse -Filter '*.dll' | ForEach-Object {
-              Copy-Item $_.FullName -Destination $outDir -Force
+              Copy-Item $_.FullName -Destination "$outDir/_shared" -Force
+          }
+          $resSrc = (Get-ChildItem -Path 'sdk' -Recurse -Directory -Filter 'resources' | Select-Object -First 1).FullName
+          if ($resSrc) {
+              Copy-Item -Path $resSrc -Destination "$outDir/_shared/resources" -Recurse -Force
+          }
+          $inspSrc = (Get-ChildItem -Path 'sdk' -Recurse -Directory -Filter 'inspector' | Select-Object -First 1).FullName
+          if ($inspSrc) {
+              Copy-Item -Path $inspSrc -Destination "$outDir/_shared/inspector" -Recurse -Force
           }
 
-          # 3. Copy top-level resources, inspector, and assets
-          @('resources', 'inspector', 'assets') | ForEach-Object {
-              $src = Join-Path 'sdk' $_
-              if (Test-Path $src) {
-                  Copy-Item -Path $src -Destination (Join-Path $outDir $_) -Recurse -Force
+          # 2. Template for inflate.bat inside each sample folder
+          $inflateBat = @"
+          @echo off
+          echo Inflating DLLs and resources...
+          xcopy /Y /Q "..\ _shared\*.dll" "." >nul 2>&1
+          xcopy /E /I /Y /Q "..\ _shared\resources" ".\resources" >nul 2>&1
+          xcopy /E /I /Y /Q "..\ _shared\resources" ".\assets\resources" >nul 2>&1
+          if exist "..\ _shared\inspector" xcopy /E /I /Y /Q "..\ _shared\inspector" ".\inspector" >nul 2>&1
+          echo Ready! Running sample...
+          for %%i in (*.exe) do start "" "%%i"
+          "@
+
+          # 3. Populate each sample folder with its assets, .bat, and .exe
+          Get-ChildItem -Path 'sdk/samples' -Directory | ForEach-Object {
+              $sampleDir = $_
+              $sampleName = $sampleDir.Name
+              $targetSampleDir = Join-Path $outDir $sampleName
+              New-Item -ItemType Directory -Path $targetSampleDir -Force | Out-Null
+
+              # Copy sample assets
+              $assetsDir = Join-Path $sampleDir.FullName 'assets'
+              if (Test-Path $assetsDir) {
+                  Copy-Item -Path $assetsDir -Destination (Join-Path $targetSampleDir 'assets') -Recurse -Force
               }
-              $binSrc = Join-Path 'sdk/bin' $_
-              if (Test-Path $binSrc) {
-                  Copy-Item -Path $binSrc -Destination (Join-Path $outDir $_) -Recurse -Force
+
+              # Write inflate.bat
+              Set-Content -Path (Join-Path $targetSampleDir "inflate.bat") -Value $inflateBat -Encoding ASCII
+          }
+
+          # 4. Route compiled .exe to matching sample folder
+          Get-ChildItem -Path 'sdk/build' -Recurse -Filter '*.exe' | ForEach-Object {
+              $exeFile = $_
+              $exeNameNoExt = [System.IO.Path]::GetFileNameWithoutExtension($exeFile.Name)
+
+              $matchedDir = Get-ChildItem -Path $outDir -Directory | Where-Object {
+                  $_.Name -ne '_shared' -and ($_.Name -like "*$exeNameNoExt*" -or $exeNameNoExt -like "*$($_.Name)*")
+              } | Select-Object -First 1
+
+              if ($matchedDir) {
+                  Copy-Item -Path $exeFile.FullName -Destination $matchedDir.FullName -Force
+              } else {
+                  Copy-Item -Path $exeFile.FullName -Destination $outDir -Force
               }
           }
-
-          # 4. FIX: Place resources inside assets/ for AppCore's file_system_path resolution
-          $resSrc = Join-Path $outDir 'resources'
-          if (Test-Path $resSrc) {
-              $assetsResDir = Join-Path $outDir 'assets/resources'
-              New-Item -ItemType Directory -Path (Split-Path $assetsResDir) -Force | Out-Null
-              Copy-Item -Path $resSrc -Destination $assetsResDir -Recurse -Force
-          }
-
-          # 5. Copy sample-specific HTML/CSS assets and inject resources folder into each
-          Get-ChildItem -Path 'sdk/samples' -Recurse -Directory -Filter 'assets' | ForEach-Object {
-              $sampleName = $_.Parent.Name
-              $targetDir = Join-Path $outDir "samples/$sampleName/assets"
-              New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
-              Copy-Item -Path "$($_.FullName)/*" -Destination $targetDir -Recurse -Force
-
-              # Also copy resources into the sample assets folder
-              if (Test-Path $resSrc) {
-                  Copy-Item -Path $resSrc -Destination (Join-Path $targetDir 'resources') -Recurse -Force
-              }
-          }
-          
 
       - name: Upload Timestamped Artifact
         uses: actions/upload-artifact@v4
