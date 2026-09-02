@@ -1,0 +1,79 @@
+name: Build Ultralight Samples
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  schedule:
+    # Optional: Run automatically every week (Sunday at midnight UTC) to catch SDK updates
+    - cron: '0 0 * * 0'
+  workflow_dispatch: # Allows manual trigger from GitHub UI
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Set current date
+        id: date
+        shell: pwsh
+        run: |
+          $currentDate = Get-Date -Format "yyyy-MM-dd"
+          echo "BUILD_DATE=$currentDate" >> $env:GITHUB_ENV
+
+      - name: Download Ultralight SDK
+        shell: pwsh
+        run: |
+          $url = "https://ultralight-sdk.sfo2.cdn.digitaloceanspaces.com/ultralight-sdk-latest-win-x64.7z"
+          Invoke-WebRequest -Uri $url -OutFile "ultralight-sdk.7z"
+
+      - name: Extract SDK
+        shell: pwsh
+        run: |
+          7z x ultralight-sdk.7z -osdk
+
+      - name: Configure CMake
+        working-directory: sdk
+        run: |
+          cmake -B build -A x64
+
+      - name: Build Samples (Release)
+        working-directory: sdk
+        run: |
+          cmake --build build --config Release --parallel
+
+      - name: Prepare Output Package
+        shell: pwsh
+        run: |
+          $distDir = "ultralight-samples-${{ env.BUILD_DATE }}"
+          New-Item -ItemType Directory -Path $distDir -Force
+
+          # 1. Copy built executables (.exe)
+          Get-ChildItem -Path "sdk/build" -Recurse -Filter "*.exe" | ForEach-Object {
+              Copy-Item $_.FullName -Destination $distDir -Force
+          }
+
+          # 2. Copy required runtime DLLs from SDK bin/lib/build directories
+          Get-ChildItem -Path "sdk" -Recurse -Filter "*.dll" | ForEach-Object {
+              Copy-Item $_.FullName -Destination $distDir -Force
+          }
+
+          # 3. Copy Ultralight assets, resources, and inspector files (required by samples)
+          $foldersToCopy = @("assets", "resources", "inspector")
+          foreach ($folder in $foldersToCopy) {
+              $match = Get-ChildItem -Path "sdk" -Recurse -Directory -Filter $folder | Select-Object -First 1
+              if ($match) {
+                  Copy-Item -Path $match.FullName -Destination "$distDir/$folder" -Recurse -Force
+              }
+          }
+
+          # 4. Create dated zip archive
+          Compress-Archive -Path "$distDir/*" -DestinationPath "$distDir.zip" -Force
+
+      - name: Upload Dated Zip Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ultralight-samples-win-x64-${{ env.BUILD_DATE }}
+          path: ultralight-samples-${{ env.BUILD_DATE }}.zip
+          retention-days: 30
