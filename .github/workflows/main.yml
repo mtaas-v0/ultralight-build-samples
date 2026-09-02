@@ -54,20 +54,44 @@ jobs:
       - name: Prepare Output Package
         shell: pwsh
         run: |
-          $distDir = "ultralight-samples-${{ env.BUILD_DATE }}"
-          New-Item -ItemType Directory -Path $distDir -Force
+          $outDir = "ultralight-samples-$($env:BUILD_DATE)"
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
-          # 1. Copy built executables (.exe)
-          Get-ChildItem -Path "sdk/build" -Recurse -Filter "*.exe" | ForEach-Object {
-              Copy-Item $_.FullName -Destination $distDir -Force
+          # Copy executables
+          Get-ChildItem -Path 'sdk/build' -Recurse -Filter '*.exe' | ForEach-Object {
+              Copy-Item $_.FullName -Destination $outDir -Force
           }
 
-          # 2. Copy required runtime DLLs
-          Get-ChildItem -Path "sdk" -Recurse -Filter "*.dll" | ForEach-Object {
-              Copy-Item $_.FullName -Destination $distDir -Force
+          # Copy runtime DLLs
+          Get-ChildItem -Path 'sdk' -Recurse -Filter '*.dll' | ForEach-Object {
+              Copy-Item $_.FullName -Destination $outDir -Force
           }
 
-          # 3. Copy Ultralight assets, resources, and inspector files
-          $foldersToCopy = @("assets", "resources", "inspector")
-          foreach ($folder in $foldersToCopy) {
-              $match = Get-ChildItem -Path "sd
+          # Copy top-level resources/assets
+          @('resources', 'inspector', 'assets') | ForEach-Object {
+              $src = Join-Path 'sdk' $_
+              if (Test-Path $src) {
+                  Copy-Item -Path $src -Destination (Join-Path $outDir $_) -Recurse -Force
+              }
+              $binSrc = Join-Path 'sdk/bin' $_
+              if (Test-Path $binSrc) {
+                  Copy-Item -Path $binSrc -Destination (Join-Path $outDir $_) -Recurse -Force
+              }
+          }
+
+          # Copy sample-specific assets
+          Get-ChildItem -Path 'sdk/samples' -Recurse -Directory -Filter 'assets' | ForEach-Object {
+              $sampleName = $_.Parent.Name
+              $target = Join-Path $outDir "samples/$sampleName"
+              New-Item -ItemType Directory -Path $target -Force | Out-Null
+              Copy-Item -Path $_.FullName -Destination $target -Recurse -Force
+          }
+
+          Compress-Archive -Path "$outDir/*" -DestinationPath "$outDir.zip" -Force
+
+      - name: Upload Dated Zip Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ultralight-samples-win-x64-${{ env.BUILD_DATE }}
+          path: ultralight-samples-${{ env.BUILD_DATE }}.zip
+          retention-days: 30
