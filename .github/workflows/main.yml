@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [ "main", "master" ]
   schedule:
-    - cron: '0 0 * * 0'
+    - cron: '0 0 1 * *' 
   workflow_dispatch:
 
 jobs:
@@ -18,6 +18,7 @@ jobs:
         id: timestamp
         shell: pwsh
         run: |
+          # Generates format: YYYY-MM-DD_HH-mm (in UTC)
           $currentTimestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd_HH-mm")
           echo "BUILD_TIMESTAMP=$currentTimestamp" >> $env:GITHUB_ENV
 
@@ -46,71 +47,55 @@ jobs:
 
           cmake -B build -A x64 "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
 
-      - name: Build Samples (Release)
-        working-directory: sdk
-        run: |
-          cmake --build build --config Release --parallel
-
       - name: Prepare Output Package
         shell: pwsh
         run: |
           $outDir = "ultralight-samples-$($env:BUILD_TIMESTAMP)"
           New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
-          # Find SDK resource/bin folders
-          $sdkResources = (Get-ChildItem -Path 'sdk' -Recurse -Directory -Filter 'resources' | Select-Object -First 1).FullName
-          $sdkInspector = (Get-ChildItem -Path 'sdk' -Recurse -Directory -Filter 'inspector' | Select-Object -First 1).FullName
-          $sdkDlls = Get-ChildItem -Path 'sdk' -Recurse -Filter '*.dll'
-
-          # Process each sample directory under sdk/samples
-          Get-ChildItem -Path 'sdk/samples' -Directory | ForEach-Object {
-              $sampleDir = $_
-              $sampleName = $sampleDir.Name
-              $targetSampleDir = Join-Path $outDir $sampleName
-              New-Item -ItemType Directory -Path $targetSampleDir -Force | Out-Null
-
-              # 1. Copy sample-specific assets if present
-              $assetsDir = Join-Path $sampleDir.FullName 'assets'
-              if (Test-Path $assetsDir) {
-                  $targetAssets = Join-Path $targetSampleDir 'assets'
-                  Copy-Item -Path $assetsDir -Destination $targetAssets -Recurse -Force
-
-                  # Copy resources into assets/resources for AppCore file_system_path
-                  if ($sdkResources) {
-                      Copy-Item -Path $sdkResources -Destination (Join-Path $targetAssets 'resources') -Recurse -Force
-                  }
-              }
-
-              # 2. Copy root resources & inspector
-              if ($sdkResources) {
-                  Copy-Item -Path $sdkResources -Destination (Join-Path $targetSampleDir 'resources') -Recurse -Force
-              }
-              if ($sdkInspector) {
-                  Copy-Item -Path $sdkInspector -Destination (Join-Path $targetSampleDir 'inspector') -Recurse -Force
-              }
-
-              # 3. Copy all runtime DLLs
-              foreach ($dll in $sdkDlls) {
-                  Copy-Item -Path $dll.FullName -Destination $targetSampleDir -Force
-              }
-          }
-
-          # 4. Find all compiled .exe files and place them into their corresponding sample folders
+          # 1. Copy all compiled executables (.exe)
           Get-ChildItem -Path 'sdk/build' -Recurse -Filter '*.exe' | ForEach-Object {
-              $exeFile = $_
-              $exeNameNoExt = [System.IO.Path]::GetFileNameWithoutExtension($exeFile.Name)
+              Copy-Item $_.FullName -Destination $outDir -Force
+          }
 
-              # Match executable with its target directory (or fall back to output root)
-              $matchedDir = Get-ChildItem -Path $outDir -Directory | Where-Object {
-                  $_.Name -like "*$exeNameNoExt*" -or $exeNameNoExt -like "*$($_.Name)*"
-              } | Select-Object -First 1
+          # 2. Copy all runtime DLLs
+          Get-ChildItem -Path 'sdk' -Recurse -Filter '*.dll' | ForEach-Object {
+              Copy-Item $_.FullName -Destination $outDir -Force
+          }
 
-              if ($matchedDir) {
-                  Copy-Item -Path $exeFile.FullName -Destination $matchedDir.FullName -Force
-              } else {
-                  Copy-Item -Path $exeFile.FullName -Destination $outDir -Force
+          # 3. Copy top-level resources, inspector, and assets
+          @('resources', 'inspector', 'assets') | ForEach-Object {
+              $src = Join-Path 'sdk' $_
+              if (Test-Path $src) {
+                  Copy-Item -Path $src -Destination (Join-Path $outDir $_) -Recurse -Force
+              }
+              $binSrc = Join-Path 'sdk/bin' $_
+              if (Test-Path $binSrc) {
+                  Copy-Item -Path $binSrc -Destination (Join-Path $outDir $_) -Recurse -Force
               }
           }
+
+          # 4. FIX: Place resources inside assets/ for AppCore's file_system_path resolution
+          $resSrc = Join-Path $outDir 'resources'
+          if (Test-Path $resSrc) {
+              $assetsResDir = Join-Path $outDir 'assets/resources'
+              New-Item -ItemType Directory -Path (Split-Path $assetsResDir) -Force | Out-Null
+              Copy-Item -Path $resSrc -Destination $assetsResDir -Recurse -Force
+          }
+
+          # 5. Copy sample-specific HTML/CSS assets and inject resources folder into each
+          Get-ChildItem -Path 'sdk/samples' -Recurse -Directory -Filter 'assets' | ForEach-Object {
+              $sampleName = $_.Parent.Name
+              $targetDir = Join-Path $outDir "samples/$sampleName/assets"
+              New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+              Copy-Item -Path "$($_.FullName)/*" -Destination $targetDir -Recurse -Force
+
+              # Also copy resources into the sample assets folder
+              if (Test-Path $resSrc) {
+                  Copy-Item -Path $resSrc -Destination (Join-Path $targetDir 'resources') -Recurse -Force
+              }
+          }
+          
 
       - name: Upload Timestamped Artifact
         uses: actions/upload-artifact@v4
