@@ -36,12 +36,15 @@ jobs:
         working-directory: sdk
         shell: pwsh
         run: |
-          # Update cmake_minimum_required in all CMakeLists.txt files
+          $env:CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+
           Get-ChildItem -Path . -Recurse -Filter "CMakeLists.txt" | ForEach-Object {
-              (Get-Content $_.FullName) -replace 'cmake_minimum_required\s*\(\s*VERSION\s+[0-9.]+', 'cmake_minimum_required(VERSION 3.15' | Set-Content $_.FullName
+              $text = Get-Content $_.FullName -Raw
+              $text = $text -replace 'cmake_minimum_required\s*\([^)]*\)', 'cmake_minimum_required(VERSION 3.15)'
+              Set-Content -Path $_.FullName -Value $text -NoNewline
           }
 
-          cmake -B build -A x64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          cmake -B build -A x64 "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
 
       - name: Build Samples (Release)
         working-directory: sdk
@@ -67,18 +70,4 @@ jobs:
           # 3. Copy Ultralight assets, resources, and inspector files
           $foldersToCopy = @("assets", "resources", "inspector")
           foreach ($folder in $foldersToCopy) {
-              $match = Get-ChildItem -Path "sdk" -Recurse -Directory -Filter $folder | Select-Object -First 1
-              if ($match) {
-                  Copy-Item -Path $match.FullName -Destination "$distDir/$folder" -Recurse -Force
-              }
-          }
-
-          # 4. Create dated zip archive
-          Compress-Archive -Path "$distDir/*" -DestinationPath "$distDir.zip" -Force
-
-      - name: Upload Dated Zip Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ultralight-samples-win-x64-${{ env.BUILD_DATE }}
-          path: ultralight-samples-${{ env.BUILD_DATE }}.zip
-          retention-days: 30
+              $match = Get-ChildItem -Path "sd
