@@ -6,9 +6,8 @@ on:
   pull_request:
     branches: [ "main", "master" ]
   schedule:
-    # Optional: Run automatically every week (Sunday at midnight UTC) to catch SDK updates
     - cron: '0 0 * * 0'
-  workflow_dispatch: # Allows manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
   build:
@@ -35,8 +34,14 @@ jobs:
 
       - name: Configure CMake
         working-directory: sdk
+        shell: pwsh
         run: |
-          cmake -B build -A x64
+          # Update cmake_minimum_required in all CMakeLists.txt files
+          Get-ChildItem -Path . -Recurse -Filter "CMakeLists.txt" | ForEach-Object {
+              (Get-Content $_.FullName) -replace 'cmake_minimum_required\s*\(\s*VERSION\s+[0-9.]+', 'cmake_minimum_required(VERSION 3.15' | Set-Content $_.FullName
+          }
+
+          cmake -B build -A x64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Build Samples (Release)
         working-directory: sdk
@@ -54,12 +59,12 @@ jobs:
               Copy-Item $_.FullName -Destination $distDir -Force
           }
 
-          # 2. Copy required runtime DLLs from SDK bin/lib/build directories
+          # 2. Copy required runtime DLLs
           Get-ChildItem -Path "sdk" -Recurse -Filter "*.dll" | ForEach-Object {
               Copy-Item $_.FullName -Destination $distDir -Force
           }
 
-          # 3. Copy Ultralight assets, resources, and inspector files (required by samples)
+          # 3. Copy Ultralight assets, resources, and inspector files
           $foldersToCopy = @("assets", "resources", "inspector")
           foreach ($folder in $foldersToCopy) {
               $match = Get-ChildItem -Path "sdk" -Recurse -Directory -Filter $folder | Select-Object -First 1
