@@ -114,8 +114,11 @@ jobs:
               echo [WARNING] No resources folder in _shared!
           )
           
+          echo.
+          echo --- Copying Inspector ---
           if exist "!SHARED_DIR!\inspector" (
               xcopy /E /I /Y "!SHARED_DIR!\inspector" "%~dp0inspector"
+              xcopy /E /I /Y "!SHARED_DIR!\inspector" "%~dp0assets\inspector"
           )
           
           echo.
@@ -163,27 +166,38 @@ jobs:
               [System.IO.File]::WriteAllText((Join-Path $targetSampleDir "inflate.bat"), $inflateBat, [System.Text.Encoding]::ASCII)
           }
 
-          # 5. Search for compiled .exe files across the SDK (excluding CMakeFiles internal tests)
-          Write-Host "--- Finding compiled .exe files ---"
+          # 5. Route compiled .exe files to their respective sample folder by index/name
+          Write-Host "--- Finding and Routing compiled .exe files ---"
           Get-ChildItem -Path 'sdk' -Recurse -Filter '*.exe' | Where-Object { $_.FullName -notmatch 'CMakeFiles' } | ForEach-Object {
               $exeFile = $_
+              $exeName = $exeFile.BaseName
               Write-Host "Found EXE: $($exeFile.FullName)"
-              $exeNameNoExt = [System.IO.Path]::GetFileNameWithoutExtension($exeFile.Name)
 
-              # Match executable with its target sample directory
-              $matchedDir = Get-ChildItem -Path $outDir -Directory | Where-Object {
-                  $_.Name -ne '_shared' -and (
-                      $_.Name -like "*$exeNameNoExt*" -or 
-                      $exeNameNoExt -like "*$($_.Name)*" -or 
-                      $exeNameNoExt.Replace(' ','') -like "*$($_.Name.Replace(' ',''))*"
-                  )
-              } | Select-Object -First 1
+              $matchedDir = $null
+
+              # Match by sample number (e.g. Sample 1.exe or Sample1.exe -> Sample 1 - ...)
+              if ($exeName -match '(\d+)') {
+                  $num = $matches[1]
+                  $matchedDir = Get-ChildItem -Path $outDir -Directory | Where-Object {
+                      $_.Name -match "^Sample\s*$num\b" -or $_.Name -match "\b$num\b"
+                  } | Select-Object -First 1
+              }
+
+              # Fallback match by name substring
+              if (-not $matchedDir) {
+                  $matchedDir = Get-ChildItem -Path $outDir -Directory | Where-Object {
+                      $_.Name -ne '_shared' -and (
+                          $_.Name.Contains($exeName) -or
+                          $exeName.Contains($_.Name)
+                      )
+                  } | Select-Object -First 1
+              }
 
               if ($matchedDir) {
-                  Write-Host "  -> Copying to $($matchedDir.FullName)"
+                  Write-Host "  -> Routing $($exeFile.Name) to $($matchedDir.Name)"
                   Copy-Item -Path $exeFile.FullName -Destination $matchedDir.FullName -Force
               } else {
-                  Write-Host "  -> No matching sample folder for $($exeFile.Name), placing at output root"
+                  Write-Host "  -> Warning: No matching folder for $($exeFile.Name), copying to root"
                   Copy-Item -Path $exeFile.FullName -Destination $outDir -Force
               }
           }
