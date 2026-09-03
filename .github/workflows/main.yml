@@ -6,7 +6,8 @@ on:
   pull_request:
     branches: [ "main", "master" ]
   schedule:
-    - cron: '0 0 1 * *' 
+    # Runs on the 1st of every month at midnight UTC
+    - cron: '0 0 1 * *'
   workflow_dispatch:
 
 jobs:
@@ -18,7 +19,6 @@ jobs:
         id: timestamp
         shell: pwsh
         run: |
-          # Generates format: YYYY-MM-DD_HH-mm (in UTC)
           $currentTimestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd_HH-mm")
           echo "BUILD_TIMESTAMP=$currentTimestamp" >> $env:GITHUB_ENV
 
@@ -47,38 +47,106 @@ jobs:
 
           cmake -B build -A x64 "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
 
+      - name: Build Samples (Release)
+        working-directory: sdk
+        run: |
+          cmake --build build --config Release --parallel
+
       - name: Prepare Output Package
         shell: pwsh
         run: |
           $outDir = "ultralight-samples-$($env:BUILD_TIMESTAMP)"
-          New-Item -ItemType Directory -Path "$outDir/_shared" -Force | Out-Null
+          $sharedDir = Join-Path $outDir "_shared"
+          New-Item -ItemType Directory -Path $sharedDir -Force | Out-Null
 
-          # 1. Store DLLs & resources ONCE in _shared folder
+          # 1. Copy DLLs to _shared
+          Write-Host "--- Collecting DLLs into _shared ---"
           Get-ChildItem -Path 'sdk' -Recurse -Filter '*.dll' | ForEach-Object {
-              Copy-Item $_.FullName -Destination "$outDir/_shared" -Force
+              Copy-Item $_.FullName -Destination $sharedDir -Force
+              Write-Host "  Copied DLL: $($_.Name)"
           }
+
+          # 2. Copy resources & inspector to _shared
           $resSrc = (Get-ChildItem -Path 'sdk' -Recurse -Directory -Filter 'resources' | Select-Object -First 1).FullName
           if ($resSrc) {
-              Copy-Item -Path $resSrc -Destination "$outDir/_shared/resources" -Recurse -Force
+              Copy-Item -Path $resSrc -Destination (Join-Path $sharedDir 'resources') -Recurse -Force
           }
           $inspSrc = (Get-ChildItem -Path 'sdk' -Recurse -Directory -Filter 'inspector' | Select-Object -First 1).FullName
           if ($inspSrc) {
-              Copy-Item -Path $inspSrc -Destination "$outDir/_shared/inspector" -Recurse -Force
+              Copy-Item -Path $inspSrc -Destination (Join-Path $sharedDir 'inspector') -Recurse -Force
           }
 
-          # 2. Template for inflate.bat inside each sample folder
-          $inflateBat = @"
+          # 3. Create diagnostic inflate.bat template
+          $inflateBat = @'
           @echo off
-          echo Inflating DLLs and resources...
-          xcopy /Y /Q "..\ _shared\*.dll" "." >nul 2>&1
-          xcopy /E /I /Y /Q "..\ _shared\resources" ".\resources" >nul 2>&1
-          xcopy /E /I /Y /Q "..\ _shared\resources" ".\assets\resources" >nul 2>&1
-          if exist "..\ _shared\inspector" xcopy /E /I /Y /Q "..\ _shared\inspector" ".\inspector" >nul 2>&1
-          echo Ready! Running sample...
-          for %%i in (*.exe) do start "" "%%i"
-          "@
+          setlocal enabledelayedexpansion
+          
+          echo ======================================================
+          echo           Ultralight Sample Inflate ^& Run            
+          echo ======================================================
+          echo Current Dir: "%~dp0"
+          set "SHARED_DIR=%~dp0..\_shared"
+          echo Shared Dir:  "!SHARED_DIR!"
+          
+          if not exist "!SHARED_DIR!" (
+              echo [ERROR] Shared directory not found at "!SHARED_DIR!"!
+              goto :error
+          )
+          
+          echo.
+          echo --- Checking DLLs in _shared ---
+          dir /b "!SHARED_DIR!\*.dll" 2>nul
+          if errorlevel 1 (
+              echo [ERROR] No DLLs found in "!SHARED_DIR!"!
+              goto :error
+          )
+          
+          echo.
+          echo --- Copying DLLs ---
+          copy /Y "!SHARED_DIR!\*.dll" "%~dp0"
+          
+          echo.
+          echo --- Copying Resources ---
+          if exist "!SHARED_DIR!\resources" (
+              xcopy /E /I /Y "!SHARED_DIR!\resources" "%~dp0resources"
+              xcopy /E /I /Y "!SHARED_DIR!\resources" "%~dp0assets\resources"
+          ) else (
+              echo [WARNING] No resources folder in _shared!
+          )
+          
+          if exist "!SHARED_DIR!\inspector" (
+              xcopy /E /I /Y "!SHARED_DIR!\inspector" "%~dp0inspector"
+          )
+          
+          echo.
+          echo --- Finding Executable ---
+          set "FOUND_EXE="
+          for %%f in ("%~dp0*.exe") do (
+              set "FOUND_EXE=%%~nxf"
+              echo Found executable: %%~nxf
+          )
+          
+          if not defined FOUND_EXE (
+              echo [ERROR] No .exe found in "%~dp0"!
+              goto :error
+          )
+          
+          echo.
+          echo ======================================================
+          echo Launching: !FOUND_EXE!
+          echo ======================================================
+          cd /d "%~dp0"
+          start "" "%~dp0!FOUND_EXE!"
+          exit /b 0
+          
+          :error
+          echo.
+          echo [FAILED] Something went wrong during inflation.
+          pause
+          exit /b 1
+          '@
 
-          # 3. Populate each sample folder with its assets, .bat, and .exe
+          # 4. Create sample directories and copy assets
           Get-ChildItem -Path 'sdk/samples' -Directory | ForEach-Object {
               $sampleDir = $_
               $sampleName = $sampleDir.Name
@@ -92,21 +160,30 @@ jobs:
               }
 
               # Write inflate.bat
-              Set-Content -Path (Join-Path $targetSampleDir "inflate.bat") -Value $inflateBat -Encoding ASCII
+              [System.IO.File]::WriteAllText((Join-Path $targetSampleDir "inflate.bat"), $inflateBat, [System.Text.Encoding]::ASCII)
           }
 
-          # 4. Route compiled .exe to matching sample folder
-          Get-ChildItem -Path 'sdk/build' -Recurse -Filter '*.exe' | ForEach-Object {
+          # 5. Search for compiled .exe files across the SDK (excluding CMakeFiles internal tests)
+          Write-Host "--- Finding compiled .exe files ---"
+          Get-ChildItem -Path 'sdk' -Recurse -Filter '*.exe' | Where-Object { $_.FullName -notmatch 'CMakeFiles' } | ForEach-Object {
               $exeFile = $_
+              Write-Host "Found EXE: $($exeFile.FullName)"
               $exeNameNoExt = [System.IO.Path]::GetFileNameWithoutExtension($exeFile.Name)
 
+              # Match executable with its target sample directory
               $matchedDir = Get-ChildItem -Path $outDir -Directory | Where-Object {
-                  $_.Name -ne '_shared' -and ($_.Name -like "*$exeNameNoExt*" -or $exeNameNoExt -like "*$($_.Name)*")
+                  $_.Name -ne '_shared' -and (
+                      $_.Name -like "*$exeNameNoExt*" -or 
+                      $exeNameNoExt -like "*$($_.Name)*" -or 
+                      $exeNameNoExt.Replace(' ','') -like "*$($_.Name.Replace(' ',''))*"
+                  )
               } | Select-Object -First 1
 
               if ($matchedDir) {
+                  Write-Host "  -> Copying to $($matchedDir.FullName)"
                   Copy-Item -Path $exeFile.FullName -Destination $matchedDir.FullName -Force
               } else {
+                  Write-Host "  -> No matching sample folder for $($exeFile.Name), placing at output root"
                   Copy-Item -Path $exeFile.FullName -Destination $outDir -Force
               }
           }
